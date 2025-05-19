@@ -6,5 +6,5 @@ Other libraries are not necessary.
 Enough to control the rover as is.
 
 ## loco_lib_uart.py
-Uses a modified version of [TMotorCanControl](https://github.com/neurobionics/TMotorCANControl)  
+Uses a modified version of [TMotorCANControl](https://github.com/neurobionics/TMotorCANControl)  
 Enough to control the rover as is.
