@@ -1,32 +1,47 @@
+import os
 import can
 import time
-import subprocess
+import subprocess  
 import math
+import gps_lib_desktop
+import getGps_desktop
+import pyzed.sl as sl
+import logging 
 
 #mv_1 mv_2 ---> front_right
 #mv_3 mv_4 ---> back_right
 
+#logging.basicConfig(level=logging.DEBUG)
+
+
+
 control_modes = {"SET_DUTY":0, "SET_CURRENT":1, "SET_CURRENT_BRAKE":2, "SET_RPM":3, "SET_POS":4, "SET_ORIGIN_HERE":5, "SET_POS_SPD":6}
-can_channel = "can1" #can0 or can1
-tx_timeout =  0.05 #second
-rx_timeout =  0.05 #second
-can_bitrate = 1000000
+can_channel = os.getenv("MOTOR_CAN")
+tx_timeout =  0.1 #second
+rx_timeout =  0.1 #second
+can_bitrate = 500000
 rpm_constant = 200
 
-max_number_of_fail = 20
+heading_offset = None
+magnetic_declination = None
+
+initial_run = 1
+
+max_number_of_fail = 12
 
 bus = None
 
-motors_dictionary = {"mv_1":1, "mv_2":2, "mv_3":3, "mv_4":4}
+motors_dictionary = {"mv_1":251, "mv_2":252, "mv_3":-1, "mv_4":254} #Put -1 if motor can not be reachable
+motors_directiones = {"mv_1":1, "mv_2":-1, "mv_3":1, "mv_4":-1} #Put -1 for reverse
 
 motor_situations = {value: [0, 0, 0, 0, 0, 0, 0, 0] for key,value in motors_dictionary.items()}
 
-fail_counter = 0
+fail_counter = 0 
 
 buffer_vertical = [0]
 buffer_angular = [0]
 
-buffer_length = 10
+buffer_length = 5
 
 
 def start_bus():
@@ -43,8 +58,8 @@ def can_transmit(arb_id,message_data): #arbitation_id(hex) first 21 bits are for
     try:
         bus.send(message, timeout=tx_timeout)
 
-    except can.CanError:
-        print("Failed to send message!")
+    except can.CanError as e:
+        print(f"Failed to send message! Error: {e}")
         fail_counter += 1
 
 def pad_to_eight(input_list):
@@ -59,8 +74,8 @@ def can_recive():
                 recived_id = int(bin(int(message.arbitration_id))[2:].zfill(29)[-8:],2)
                 recived_situation = bin(int(message.arbitration_id))[2:].zfill(29)[:-8]
 
-                #motor_situations[recived_id] = pad_to_eight([message.data[0], message.data[1], message.data[2], message.data[3], message.data[4], message.data[5], message.data[6], message.data[7]])
-
+                motor_situations[recived_id] = pad_to_eight([message.data[0], message.data[1], message.data[2], message.data[3], message.data[4], message.data[5], message.data[6], message.data[7]])
+                
                 if len(message.data) == 8:
                     high_byte_of_position = message.data[0]
                     low_byte_of_position = message.data[1]
@@ -69,13 +84,13 @@ def can_recive():
                     high_byte_of_current = message.data[4]
                     low_byte_of_current = message.data[5]
                     motor_temperature = message.data[6] # In celcius degree
-                    error_code = message.data[7] #Error code
+                    error_code = message.data[7] #Error code 
 
 
                     position_recived = int(bin(high_byte_of_position)[2:].zfill(8) + bin(low_byte_of_position)[2:].zfill(8),2) / 10.0 # Position in degrees
                     speed_recived = int(bin(high_byte_of_speed)[2:].zfill(8) + bin(low_byte_of_speed)[2:].zfill(8),2) * 10.0 # Speed in rpm
                     current_recived = int(bin(high_byte_of_current)[2:].zfill(8) + bin(low_byte_of_current)[2:].zfill(8),2) / 100.0 # Current in amps
-
+                    
                     if error_code == 0:
                         return recived_id,position_recived,speed_recived,current_recived,motor_temperature #,recived_situation
 
@@ -87,19 +102,19 @@ def can_recive():
                 else:
                     fail_counter += 1
                     print("Incorrect number of data bytes recived.")
-
+            
             else:
                 print("No message recived!")
-                #fail_counter += 1
+                fail_counter += 1
                 return None
-
+                 
         except can.CanError:
             print("Failed to recive message!")
             fail_counter += 1
-
+    
 
 def set_duty(motor_id, duty_cycle):
-    if -1 <= duty_cycle <= 1:
+    if -1 <= duty_cycle <= 1: 
 
         duty = duty_cycle*100000
         duty = bin(int(duty))
@@ -109,13 +124,13 @@ def set_duty(motor_id, duty_cycle):
              n = len(duty)
              flipped = ''.join('1' if bit == '0' else '0' for bit in duty)
              duty = bin(int(flipped, 2) + 1)[2:].zfill(n)
-
+            
         duty_bytes = [int(duty[0:8],2), int(duty[8:16],2), int(duty[16:24],2), int(duty[24:32],2)]
 
         sitaution_id = bin(control_modes["SET_DUTY"])[2:].zfill(21)
         motor_id_ = bin(motor_id)[2:].zfill(8)
         arb_id = int(sitaution_id + motor_id_,2)
-
+        
         can_transmit(arb_id,duty_bytes)
     else:
         print("Incorrect duty cycle!")
@@ -123,7 +138,7 @@ def set_duty(motor_id, duty_cycle):
 
 
 def set_current_loop(motor_id, float_current): #A
-    if -60 <= float_current <= 60:
+    if -60 <= float_current <= 60: 
 
         current = float_current*1000
         current = bin(int(current))
@@ -137,14 +152,14 @@ def set_current_loop(motor_id, float_current): #A
         sitaution_id = bin(control_modes["SET_CURRENT"])[2:].zfill(21)
         motor_id_ = bin(motor_id)[2:].zfill(8)
         arb_id = int(sitaution_id + motor_id_,2)
-
+        
         can_transmit(arb_id,curret_bytes)
     else:
         print("Incorrect float current!")
         return None
 
 def set_current_brake(motor_id, brake_current): #A
-    if 0 <= brake_current <= 60:
+    if 0 <= brake_current <= 60: 
 
         current = brake_current*1000
         current = bin(int(current))
@@ -158,15 +173,15 @@ def set_current_brake(motor_id, brake_current): #A
         sitaution_id = bin(control_modes["SET_CURRENT_BRAKE"])[2:].zfill(21)
         motor_id_ = bin(motor_id)[2:].zfill(8)
         arb_id = int(sitaution_id + motor_id_,2)
-
+        
         can_transmit(arb_id,curret_bytes)
     else:
         print("Incorrect brake current!")
         return None
-
+    
 
 def set_velocity_loop(motor_id, velocity,rpm_constant = rpm_constant): #RPM
-    if -1e5/rpm_constant <= velocity <= 1e5/rpm_constant:
+    if -1e5/rpm_constant <= velocity <= 1e5/rpm_constant: 
 
         velocity_ = bin(int(velocity*rpm_constant))
         velocity_ = velocity_[velocity_.index("b")+1:].zfill(32)
@@ -180,14 +195,14 @@ def set_velocity_loop(motor_id, velocity,rpm_constant = rpm_constant): #RPM
         sitaution_id = bin(control_modes["SET_RPM"])[2:].zfill(21)
         motor_id_ = bin(motor_id)[2:].zfill(8)
         arb_id = int(sitaution_id + motor_id_,2)
-
+        
         can_transmit(arb_id,velocity_bytes)
     else:
         print("Incorrect rpm!")
         return None
 
 def set_position_loop(motor_id, position): #Degree
-    if -36000 <= position <= 36000:
+    if -36000 <= position <= 36000: 
 
         position_ = bin(int(position*1e4))
         position_ = position_[position_.index("b")+1:].zfill(32)
@@ -201,7 +216,7 @@ def set_position_loop(motor_id, position): #Degree
         sitaution_id = bin(control_modes["SET_POS"])[2:].zfill(21)
         motor_id_ = bin(motor_id)[2:].zfill(8)
         arb_id = int(sitaution_id + motor_id_,2)
-
+        
         can_transmit(arb_id,position_bytes)
     else:
         print("Incorrect position!")
@@ -214,12 +229,12 @@ def set_origin_here(motor_id):
     sitaution_id = bin(control_modes["SET_ORIGIN_HERE"])[2:].zfill(21)
     motor_id_ = bin(motor_id)[2:].zfill(8)
     arb_id = int(sitaution_id + motor_id_,2)
-
+        
     can_transmit(arb_id,set_position)
 
 
 def set_position_velocity_loop(motor_id, position, velocity, acceleration, rpm_constant = rpm_constant): #Degree, RPM , RPM/s
-    if (-36000 <= position <= 36000) and (-327680/rpm_constant <= velocity <= 327680/rpm_constant) and (0 <= acceleration <= 327670):
+    if (-36000 <= position <= 36000) and (-327680/rpm_constant <= velocity <= 327680/rpm_constant) and (0 <= acceleration <= 327670): 
 
         position_ = bin(int(position*1e4))
         position_ = position_[position_.index("b")+1:].zfill(32)
@@ -228,7 +243,7 @@ def set_position_velocity_loop(motor_id, position, velocity, acceleration, rpm_c
             n = len(position_)
             flipped = ''.join('1' if bit == '0' else '0' for bit in position_)
             position_ = bin(int(flipped, 2) + 1)[2:].zfill(n)
-
+     
         velocity_ = bin(int(velocity*rpm_constant/10))
         velocity_ = velocity_[velocity_.index("b")+1:].zfill(16)
 
@@ -236,11 +251,11 @@ def set_position_velocity_loop(motor_id, position, velocity, acceleration, rpm_c
             n = len(velocity_)
             flipped = ''.join('1' if bit == '0' else '0' for bit in velocity_)
             velocity_ = bin(int(flipped, 2) + 1)[2:].zfill(n)
-
+        
 
         acceleration_ = bin(int(acceleration/10))
         acceleration_ = acceleration_[acceleration_.index("b")+1:].zfill(16)
-
+        
         sitaution_id = bin(control_modes["SET_POS_SPD"])[2:].zfill(21)
         motor_id_ = bin(motor_id)[2:].zfill(8)
         arb_id = int(sitaution_id + motor_id_,2)
@@ -252,9 +267,6 @@ def set_position_velocity_loop(motor_id, position, velocity, acceleration, rpm_c
     else:
         print("Incorrect position or velocity or acceleration!")
         return None
-
-
-
 
 
 def stop_bus():
@@ -284,8 +296,8 @@ def angular_velocity_multiplier_function(x,dead_zone):
         c = -b*math.e**dead_zone
         return b*math.e**x + c
 
-def sticks_2_velocities(x,y): #mv_1 --> front_left !!!!!!!!!  mv_2--> front_right !!!!!!! mv_3-->back_left !!!!!!!!!! mv_4----->back_right
-
+def sticks_2_velocities(x,y): #mv_1 --> front_left !!!!!!!!!  mv_2--> front_right !!!!!!! mv_3-->back_left !!!!!!!!!! mv_4----->back_right 
+    
     x_dead_zone = 0.1
     y_dead_zone = 0.1
     diffrential_constant = 0.4
@@ -303,7 +315,7 @@ def sticks_2_velocities(x,y): #mv_1 --> front_left !!!!!!!!!  mv_2--> front_righ
     elif (-y_dead_zone < y < y_dead_zone):
         x_ = angular_velocity_multiplier_function(x,x_dead_zone)
         return [x_,-x_,x_,-x_]
-
+    
     else:
         y_ = linear_velocity_multiplier_function(y,y_dead_zone)
         x_ = angular_velocity_multiplier_function(x,x_dead_zone)
@@ -317,18 +329,18 @@ def sticks_2_velocities(x,y): #mv_1 --> front_left !!!!!!!!!  mv_2--> front_righ
 
 
 def velocity_control_loco(x,y):
-    global buffer_angular,buffer_vertical,buffer_length
     global motor_situations
     global motors_dictionary #motors ids
     global fail_counter
     global max_number_of_fail
+    global buffer_length,buffer_angular,buffer_vertical
 
     if fail_counter > max_number_of_fail:
         motor_situations = {value: [0, 0, 0, 0, 0, 0, 0, 0] for key,value in motors_dictionary.items()}
         fail_counter = 0
         print("Bus is reseting!")
         stop_bus()
-        time.sleep(3)
+        time.sleep(1)
         start_bus()
         time.sleep(1)
 
@@ -337,34 +349,93 @@ def velocity_control_loco(x,y):
 
     if len(buffer_vertical) > buffer_length:
         buffer_vertical.pop(0)
-
+    
     if len(buffer_angular) > buffer_length:
         buffer_angular.pop(0)
 
-    y2 = sum(buffer_vertical)/len(buffer_vertical)
-    x2 = sum(buffer_angular)/len(buffer_angular)
+    y = sum(buffer_vertical)/len(buffer_vertical)
+    x = sum(buffer_angular)/len(buffer_angular)
 
-    velocities = sticks_2_velocities(x2,y2)
-    velocities[1] = -velocities[1] #Change the direction of front right motor
-    velocities[3] = -velocities[3] #Change the direction of back right motor
+    velocities = sticks_2_velocities(x,y)
+  
     for i in range(4):
         id_ = motors_dictionary["mv_"+str(i+1)]
-        set_velocity_loop(id_,velocities[i])
+        motors_directione = motors_directiones["mv_"+str(i+1)]
+        if id_ != -1:
+            set_velocity_loop(id_,velocities[i]*motors_directione)
+    
+    print(f"Fail count: {fail_counter}")
 
-    print(fail_counter)
 
+def shortest_angle_difference(angle1, angle2):
+    diff = (angle2 - angle1 + 180) % 360 - 180
+    return diff
+ 
+def set_angle(target_angle, zed, sensors_data): 
+    global initial_run, heading_offset, magnetic_declination
+    if initial_run and zed is None:
+        print('Initial run')
+        init = sl.InitParameters(depth_mode=sl.DEPTH_MODE.ULTRA,
+                                    coordinate_units=sl.UNIT.METER,
+                                    coordinate_system=sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP)
+        zed = sl.Camera()
+        sensors_data = sl.SensorsData()
+        status = zed.open(init)
+        initial_run = 0
+        if status != sl.ERROR_CODE.SUCCESS:
+            print(repr(status))
+            
+    
+    magnetic_heading = target_angle + 180
+    while zed.grab() == sl.ERROR_CODE.SUCCESS:
+        zed.get_sensors_data(sensors_data, sl.TIME_REFERENCE.IMAGE) #  Get frame synchronized sensor data
+        magnetometer_data = sensors_data.get_magnetometer_data()
+        magnetic_heading = magnetometer_data.magnetic_heading 
+        magnetic_heading = (magnetic_heading + heading_offset) % 360
+        heading = magnetic_heading + magnetic_declination
+
+        #print(magnetic_heading,target_angle)
+        for _ in range(5):
+            velocity_control_loco(math.copysign(0.2,shortest_angle_difference(heading,target_angle)),0)
+            time.sleep(0.1)
+        if abs(target_angle-heading)<5:
+            break
+        time.sleep(2) 
+
+    if initial_run == 0:
+        zed.close()   
+
+def goto_coordinates(target_coordinates,zed = None, sensors_data = None, timeout = 1, heading_offset_init = 0, magnetic_declination_init = 0):
+    global heading_offset,magnetic_declination
+
+    heading_offset = heading_offset_init
+    magnetic_declination = magnetic_declination_init
+
+    coords = getGps_desktop.get_gps() #tuple(gps_lib_desktop.read_gps().values()) # pseudo coordinates getGps_desktop.get_gps()
+    angle = gps_lib_desktop.calculate_vector(coords[0],coords[1],target_coordinates[0],target_coordinates[1])[1]
+    print("Target Distance:",gps_lib_desktop.ll2meters(coords[0],coords[1],target_coordinates[0],target_coordinates[1]))
+    print("Target Angle: ",angle)
+    set_angle(angle,zed, sensors_data)
+    time_start = time.time()
+
+    while True:
+        velocity_control_loco(0.0,0.4)
+
+        if gps_lib_desktop.ll2meters(coords[0],coords[1],target_coordinates[0],target_coordinates[1]) < 2:
+            return 1
+
+        elif time.time() - time_start > timeout:
+            print("Timeout")
+            return -1
+               
 
 
 if __name__=="__main__":
     start_bus()
-
-    set_origin_here(5)
-    set_origin_here(3)
-    for _ in range(50):
-        velocity_control_loco(0.0,1.0)
-        time.sleep(0.1)
-
-        #id_ = motors_dictionary["mv_3"]
-        #set_velocity_loop(id_,20)
-
+    #buffer_length = 1
+    while True:
+        #def set_position_velocity_loop(motor_id, position, velocity, acceleration, rpm_constant = rpm_constant): #Degree, RPM , RPM/s
+        velocity_control_loco(0.0,0.8) #
+        #set_position_velocity_loop(255, 7200, 1000, 2000, 200)
+        #can_recive()
     stop_bus()
